@@ -2,17 +2,20 @@ import logging
 import os
 import sys
 import time
+from http import HTTPStatus
 
 import requests
 import telegram
-
 from dotenv import load_dotenv
+
+import exceptions
 
 
 load_dotenv()
 PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+
 
 RETRY_PERIOD = 600
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
@@ -27,9 +30,6 @@ HOMEWORK_VERDICTS = {
 
 
 log_format = '%(asctime)s [%(levelname)s] %(message)s'
-logging.basicConfig(
-    filename='homework_bot.log', format=log_format
-)
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 handler = logging.StreamHandler(stream=sys.stdout)
@@ -38,91 +38,130 @@ logger.addHandler(handler)
 
 def check_tokens():
     """Проверка переменных окружения."""
-    if PRACTICUM_TOKEN and TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-        return True
+    tokens = {
+        'PRACTICUM_TOKEN': PRACTICUM_TOKEN,
+        'TELEGRAM_TOKEN': TELEGRAM_TOKEN,
+        'TELEGRAM_CHAT_ID': TELEGRAM_CHAT_ID
+    }
+    for name, value in tokens.items():
+        if not value:
+            return name
+    return all([PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID])
 
 
 def send_message(bot, message):
     """Отправляет сообщение в Telegram чат."""
     try:
+        logger.info('Сообщение отправляется')
         bot.send_message(TELEGRAM_CHAT_ID, message)
-    except Exception:
-        logger.error('Сообщение не отправлено')
+    except telegram.error.TelegramError as error:
+        logger.error(
+            f'Не удалось отправить сообщение: {error}'
+        )
     logger.debug('Уcпешная отправка сообщения')
 
 
 def get_api_answer(timestamp):
     """Запрос к API-сервису."""
+    request = {
+        'url': ENDPOINT,
+        'headers': HEADERS,
+        'params': {'from_date': timestamp}
+    }
     try:
-        response = requests.get(
-            ENDPOINT, headers=HEADERS, params={'from_date': timestamp}
+        logger.info(
+            'Отправляется запрос: {url}; '
+            'Данные заголовка: {headers}; '
+            'Параметры: {params}'.format(**request)
         )
+        response = requests.get(**request)
         response.raise_for_status()
     except requests.RequestException as error:
-        logger.error(error)
-        bot = telegram.Bot(token=TELEGRAM_TOKEN)
-        bot.send_message(TELEGRAM_CHAT_ID, f'{error}')
-    if response.status_code == 200:
+        if response.status_code != HTTPStatus.OK:
+            raise exceptions.RequestError(f'нет ответа от API: {error}')
+    if response.status_code == HTTPStatus.OK:
         return response.json()
-    raise requests.HTTPError()
+    raise exceptions.HTTPError(
+        'Ошибка ' + str(response.status_code) + ': {url}; '
+        'Данные заголовка: {headers}; '
+        'Параметры: {params}'.format(**request)
+    )
 
 
 def check_response(response):
     """Проверка ответа API."""
-    NOT_KEY = 'Отсутствует ожидаемый ключ "homeworks"'
-    if type(response) is not dict:
-        logger.error('Ответ API не соответствует ожидаемому типу')
-        raise TypeError('Ответ API не соответствует ожидаемому типу')
-    elif response.get('homeworks') is None:
-        logger.error(NOT_KEY)
-        bot = telegram.Bot(token=TELEGRAM_TOKEN)
-        bot.send_message(TELEGRAM_CHAT_ID, NOT_KEY)
-        raise KeyError(NOT_KEY)
-    elif not isinstance(response['homeworks'], list):
-        raise TypeError('Значение ключа "homeworks" не является списком')
-    return True
+    if not isinstance(response, dict):
+        raise TypeError('ответ API не соответствует ожидаемому типу')
+    try:
+        homework = response['homeworks']
+    except KeyError as error:
+        raise exceptions.EmptyResponseAPI(
+            f'пустой ответ от API, нет ключа {error}'
+        )
+    if not isinstance(homework, list):
+        raise TypeError(
+            'в ответе от API ключ "homeworks" не является списком'
+        )
+    return homework
 
 
 def parse_status(homework):
     """Получить статус проверки работы."""
     try:
         homework_name = homework['homework_name']
-    except KeyError:
+    except KeyError as error:
         raise KeyError(
-            'В списке "homeworks" отсутствует ключ "homework_name"'
+            f'в списке "homeworks" отсутствует ключ {error}'
         )
-    try:
-        verdict = HOMEWORK_VERDICTS[homework['status']]
-    except KeyError:
-        logger.error('Неожиданный статус домашней работы')
-        bot = telegram.Bot(token=TELEGRAM_TOKEN)
-        bot.send_message(
-            TELEGRAM_CHAT_ID, 'Неожиданный статус домашней работы'
+    verdict = HOMEWORK_VERDICTS.get(homework.get('status'))
+    homework_status = homework.get('status')
+    if homework_status not in HOMEWORK_VERDICTS:
+        raise ValueError(
+            f'неизвестный статус домашней работы: {homework_status}'
         )
-        raise KeyError('В списке "homeworks" отсутствует ключ "status"')
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
 def main():
     """Основная логика работы бота."""
-    if not check_tokens():
-        logger.critical('Отсутствует обязательная переменная окружения')
-        sys.exit()
+    token = check_tokens()
+    if type(token) is str:
+        logger.critical(
+            f'Отсутствует обязательная переменная окружения {token}'
+        )
+        raise exceptions.ExitError(
+            f'Отсутствует обязательная переменная окружения {token}'
+        )
     bot = telegram.Bot(token=TELEGRAM_TOKEN)
-    timestamp = int(time.time())
+    timestamp = 0
+    old_status = ''
+    new_status = ''
     while True:
         try:
             response = get_api_answer(timestamp)
-            if check_response(response):
-                for homework in response.get('homeworks'):
-                    message = parse_status(homework)
-                    send_message(bot, message)
+            timestamp = response.get('current_data', timestamp)
+            homeworks = check_response(response)
+            if len(homeworks) == 0:
+                new_status = 'Нет новых статусов'
+                bot.send_message(TELEGRAM_CHAT_ID, new_status)
+            else:
+                homework = homeworks[0]
+                new_status = parse_status(homework)
+                if new_status != old_status:
+                    send_message(bot, new_status)
+                    old_status = new_status
+        except exceptions.EmptyResponseAPI as error:
+            logger.error(f'Пустой ответ от API: {error}')
         except Exception as error:
-            message = f'Сбой в работе программы: {error}'
             logger.error(f'Сбой в работе программы: {error}')
-            bot.send_message(TELEGRAM_CHAT_ID, f'{error}')
+            bot.send_message(
+                TELEGRAM_CHAT_ID, f'Сбой в работе программы: {error}'
+            )
         time.sleep(RETRY_PERIOD)
 
 
 if __name__ == '__main__':
+    logging.basicConfig(
+        filename='homework_bot.log', format=log_format, encoding='UTF-8'
+    )
     main()
