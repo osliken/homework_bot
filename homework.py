@@ -126,13 +126,9 @@ def main():
     """Основная логика работы бота."""
     tokens = check_tokens()
     if tokens:
-        tokens = str(tokens)[1:-1]
-        logger.critical(
-            f'Отсутствуют обязательные переменные окружения: {tokens}'
-        )
-        raise exceptions.ExitError(
-            f'Отсутствуют обязательные переменные окружения: {tokens}'
-        )
+        message = 'Отсутствуют переменные окружения: ' + ', '.join(tokens)
+        logger.critical(message)
+        raise exceptions.ExitError(message)
     bot = telegram.Bot(token=TELEGRAM_TOKEN)
     timestamp = 0
     old_status = ''
@@ -149,16 +145,18 @@ def main():
                 new_status = parse_status(homework)
             if old_status != new_status:
                 send_message(bot, new_status)
+                old_status = new_status
         except exceptions.EmptyResponseAPI as error:
             logger.error(f'Пустой ответ от API: {error}')
         except Exception as error:
             logger.error(f'Сбой в работе программы: {error}')
+            new_status = 'Нет новых статусов'
             if old_status != new_status:
                 bot.send_message(
                     TELEGRAM_CHAT_ID, f'Сбой в работе программы: {error}'
                 )
+                old_status = new_status
         finally:
-            old_status = new_status
             time.sleep(RETRY_PERIOD)
 
 
