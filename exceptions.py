@@ -1,25 +1,22 @@
-import requests
-
-
-class RequestError(requests.RequestException):
+class RequestError(Exception):
     """Исключение запроса."""
 
     pass
 
 
-class HTTPError(requests.HTTPError):
+class HTTPError(Exception):
     """Исключение соединения запроса."""
 
     pass
 
 
-class EmptyResponseAPI(ValueError):
+class EmptyResponseAPI(Exception):
     """Исключение пустого ответа от API."""
 
     pass
 
 
-class ExitError(SystemExit):
+class ExitError(Exception):
     """Исключение системного выхода из программы."""
 
     pass

@@ -43,10 +43,11 @@ def check_tokens():
         'TELEGRAM_TOKEN': TELEGRAM_TOKEN,
         'TELEGRAM_CHAT_ID': TELEGRAM_CHAT_ID
     }
+    missing_tokens = []
     for name, value in tokens.items():
         if not value:
-            return name
-    return all([PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID])
+            missing_tokens.append(name)
+    return missing_tokens
 
 
 def send_message(bot, message):
@@ -77,8 +78,7 @@ def get_api_answer(timestamp):
         response = requests.get(**request)
         response.raise_for_status()
     except requests.RequestException as error:
-        if response.status_code != HTTPStatus.OK:
-            raise exceptions.RequestError(f'нет ответа от API: {error}')
+        raise exceptions.RequestError(f'нет ответа от API: {error}')
     if response.status_code == HTTPStatus.OK:
         return response.json()
     raise exceptions.HTTPError(
@@ -93,16 +93,16 @@ def check_response(response):
     if not isinstance(response, dict):
         raise TypeError('ответ API не соответствует ожидаемому типу')
     try:
-        homework = response['homeworks']
+        homeworks = response['homeworks']
     except KeyError as error:
         raise exceptions.EmptyResponseAPI(
             f'пустой ответ от API, нет ключа {error}'
         )
-    if not isinstance(homework, list):
+    if not isinstance(homeworks, list):
         raise TypeError(
             'в ответе от API ключ "homeworks" не является списком'
         )
-    return homework
+    return homeworks
 
 
 def parse_status(homework):
@@ -124,13 +124,14 @@ def parse_status(homework):
 
 def main():
     """Основная логика работы бота."""
-    token = check_tokens()
-    if type(token) is str:
+    tokens = check_tokens()
+    if tokens:
+        tokens = str(tokens)[1:-1]
         logger.critical(
-            f'Отсутствует обязательная переменная окружения {token}'
+            f'Отсутствуют обязательные переменные окружения: {tokens}'
         )
         raise exceptions.ExitError(
-            f'Отсутствует обязательная переменная окружения {token}'
+            f'Отсутствуют обязательные переменные окружения: {tokens}'
         )
     bot = telegram.Bot(token=TELEGRAM_TOKEN)
     timestamp = 0
@@ -141,23 +142,24 @@ def main():
             response = get_api_answer(timestamp)
             timestamp = response.get('current_data', timestamp)
             homeworks = check_response(response)
-            if len(homeworks) == 0:
+            if not homeworks:
                 new_status = 'Нет новых статусов'
-                bot.send_message(TELEGRAM_CHAT_ID, new_status)
             else:
                 homework = homeworks[0]
                 new_status = parse_status(homework)
-                if new_status != old_status:
-                    send_message(bot, new_status)
-                    old_status = new_status
+            if old_status != new_status:
+                send_message(bot, new_status)
         except exceptions.EmptyResponseAPI as error:
             logger.error(f'Пустой ответ от API: {error}')
         except Exception as error:
             logger.error(f'Сбой в работе программы: {error}')
-            bot.send_message(
-                TELEGRAM_CHAT_ID, f'Сбой в работе программы: {error}'
-            )
-        time.sleep(RETRY_PERIOD)
+            if old_status != new_status:
+                bot.send_message(
+                    TELEGRAM_CHAT_ID, f'Сбой в работе программы: {error}'
+                )
+        finally:
+            old_status = new_status
+            time.sleep(RETRY_PERIOD)
 
 
 if __name__ == '__main__':
